@@ -79,7 +79,7 @@ maestro_create_group() {
         exit 1
     fi
 
-    IFS='/' read -r Maestro_Group_1_SMO_IP Maestro_Group_1_SMO_Mask_Length <<< "$system_ip_mask"
+    IFS='/' read -r Maestro_Group_SMO_IP Maestro_Group_SMO_Mask_Length <<< "$system_ip_mask"
 
     # Validate management interfaces
     echo "Testing Mgmt interface is in the expected format."
@@ -136,7 +136,7 @@ maestro_create_group() {
         cmd+=" gateways.$((i+1)).id ${gateways[$i]}"
     done
     #Finally, add in some static settings via API, the values of this can be seen in the ./Maestro_script_vars.txt file
-    cmd+=" sites.1.id $Maestro_Group_1_SiteID sites.1.description Site_1 ftw-configuration.hostname $system_name ftw-configuration.is-vsx $Maestro_Group_1_VirtGW ftw-configuration.one-time-password $Maestro_Group_1_OTP ftw-configuration.admin-password $Maestro_Group_1_pass mgmt-connectivity.ipv4-address $sg_ip mgmt-connectivity.ipv4-mask-length $sg_mask mgmt-connectivity.default-gateway $system_gateway description SecGrp_created_via_API -m $mho_ip --context gaia_api --version 1.8 --format json --session-id $session"
+    cmd+=" sites.1.id $Maestro_Group_SiteID sites.1.description Site_1 ftw-configuration.hostname $system_name ftw-configuration.is-vsx $Maestro_Group_VirtGW ftw-configuration.one-time-password $Maestro_Group_OTP ftw-configuration.admin-password $Maestro_Group_pass mgmt-connectivity.ipv4-address $sg_ip mgmt-connectivity.ipv4-mask-length $sg_mask mgmt-connectivity.default-gateway $system_gateway description SecGrp_created_via_API -m $mho_ip --context gaia_api --version 1.8 --format json --session-id $session"
     eval $cmd  > /dev/null 2>&1
 }
 
@@ -197,7 +197,7 @@ check_sg_ssh_access() {
     fi
 }
 
-# Function to start 8 minute timer
+# Function to start timer
 reboot_timer() {
     local reboot_timer=$1
     reason_message=$2
@@ -225,7 +225,7 @@ sg_active() {
             ActiveSMO_ID=$(echo "$mho_full_output" | jq -c '.gateways[] | select(.state == "ACTIVE") | {id}')
             echo "The Active device after initial FTW is: $ActiveSMO_Serial"
             if [[ -n "$ActiveSMO_ID" ]]; then
-              sg_login_session=$(mgmt_cli login user $api_user password $Maestro_Group_1_pass -m $sg_ip --context gaia_api --format json --unsafe-auto-accept true | jq -r '.sid')
+              sg_login_session=$(mgmt_cli login user $api_user password $Maestro_Group_pass -m $sg_ip --context gaia_api --format json --unsafe-auto-accept true | jq -r '.sid')
               #echo "The Group login SID is: " $sg_login_session
               set_dns $sg_login_session $sg_ip
               set_ntp $sg_login_session $sg_ip
