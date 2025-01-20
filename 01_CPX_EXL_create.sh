@@ -17,7 +17,7 @@ login_pre_ftw() {
 # Function to login to appliance AFTER the FTW has been run, but AFTER you have manually set an IP/mask/gateway and get session ID
 login_post_ftw() {
     read -p "Press Enter to continue or 'C' to cancel: " userInput
-    if [[ "$userInput" =~ ^[Cc]$ ]]; then
+    if [[ "$userInput" == "C" || "$userInput" == "c" ]]; then
         echo "Script cancelled."
         exit 1
     fi
@@ -46,7 +46,7 @@ set_mgmt_and_other_settings() {
     mgmt_cli set password-policy password-history.check-history-enabled "false" -m $EXL_Group_IP --context gaia_api --format json --version $GAIA_API_Ver --session-id $1 > /dev/null 2>&1
     mgmt_cli set user name $EXL_Group_user password $EXL_Group_pass -m $EXL_Group_IP --context gaia_api --format json --version $GAIA_API_Ver --session-id $1 > /dev/null 2>&1
     mgmt_cli set expert-password password-hash $EXL_Group_ExpertHash -m $EXL_Group_IP --context gaia_api --format json --version $GAIA_API_Ver --session-id $1 > /dev/null 2>&1
-    #Note, setting the interface settings (or default route) to a different IP address, while connected via SSH is a bad idea :) Included as an example - for use via console server for example
+    #Note, setting the interface settings (or default route) to something else, while connected via SSH is a bad idea :) Included as an example - for use via console server for example
     #mgmt_cli set physical-interface name $EXL_Group_ftw_mgmt_int ipv4-address $EXL_Group_IP ipv4-mask-length $EXL_Group_IP_mask enabled True -m $EXL_Group_IP --context gaia_api --version $GAIA_API_Ver --format json --session-id $1 > /dev/null 2>&1
     #mgmt_cli set static-route address "0.0.0.0" mask-length 0 next-hop.add.gateway $EXL_Group_DG type "gateway" comment "Default Route" -m $EXL_Group_IP --context gaia_api --version $GAIA_API_Ver --format json --session-id $1 > /dev/null 2>&1
 }
