@@ -53,7 +53,7 @@ setup_vs() {
         echo -en "\nAdding VS $id into the Management"
         gw_ip_in_mgmt=${Maestro_Group_mgmt_ips[Maestro_Group_mgmt_ipcounter]}
         gw_name_in_mgmt="$Maestro_Group_VS_naming"$id
-        mgmt_cli add simple-gateway name "$gw_name_in_mgmt" ipv4-address "$gw_ip_i_mgmt" one-time-password "$Maestro_Group_new_vs_OTP" --session-id $1 > /dev/null 2>&1
+        mgmt_cli add simple-gateway name "$gw_name_in_mgmt" ipv4-address "$gw_ip_in_mgmt" one-time-password "$Maestro_Group_new_vs_OTP" --session-id $1 > /dev/null 2>&1
         mgmt_cli set simple-gateway name "$gw_name_in_mgmt" hardware "ElasticXL Appliances" firewall-settings.auto-maximum-limit-for-concurrent-connections false --session-id $1 > /dev/null 2>&1
         mgmt_cli publish --session-id $1 > /dev/null 2>&1
         ((Maestro_Group_mgmt_ipcounter++))
