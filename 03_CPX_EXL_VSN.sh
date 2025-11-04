@@ -312,17 +312,39 @@ check_vs_creation_status() {
     local session=$1
     local expected=$((EXL_Group_end_vs_id - EXL_Group_start_vs_id + 1))
 
+    log_message "Expecting $expected new Virtual Systems (VS${EXL_Group_start_vs_id} to VS${EXL_Group_end_vs_id})"
+
     while true; do
-        local total=$(mgmt_cli show virtual-systems limit 1 offset 0 order "ASC" \
-            -m "$EXL_Group_IP" --context gaia_api --version 1.8 --format json \
-            --session-id "$session" 2>&1 | jq -r ".total // 0")
-        local created=$((total - EXL_Group_vlans_to_create))
+        # Count how many of our target VS IDs exist by checking each one individually
+        local created=0
+        local missing_vs=""
+
+        for vs_id in $(seq $EXL_Group_start_vs_id $EXL_Group_end_vs_id); do
+            # Check if this specific VS exists
+            local check_result=$(mgmt_cli show virtual-gateway id $vs_id \
+                -m "$EXL_Group_IP" --context gaia_api --version 1.8 --format json \
+                --session-id "$session" 2>&1)
+
+            log_debug "VS $vs_id check result: ${check_result:0:200}"
+
+            # If it doesn't contain "does not exist", then it exists
+            if [[ $check_result != *"does not exist"* ]] && [[ $check_result != *"not found"* ]]; then
+                ((created++))
+                log_debug "VS $vs_id found"
+            else
+                missing_vs="$missing_vs VS$vs_id"
+                log_debug "VS $vs_id missing"
+            fi
+        done
 
         clear
         echo "=========================================="
         echo "Virtual System Creation Monitor"
         echo "=========================================="
+        echo "Target Range: VS${EXL_Group_start_vs_id} to VS${EXL_Group_end_vs_id}"
         echo "Created: $created of $expected VSs"
+        [[ -n "$missing_vs" ]] && echo "Missing:$missing_vs"
+        echo "=========================================="
 
         [[ $created -ge $expected ]] && break
 
@@ -339,7 +361,7 @@ check_vs_creation_status() {
         echo
     done
 
-    log_message "All $expected Virtual Systems created successfully"
+    log_message "All $expected Virtual Systems created successfully (VS${EXL_Group_start_vs_id} to VS${EXL_Group_end_vs_id})"
 }
 
 # Configure interfaces
