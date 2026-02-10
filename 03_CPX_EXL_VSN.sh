@@ -1,4 +1,6 @@
 #!/bin/bash
+# Virtual Systems setup script (extended automatic detection for R82.10+ and JHF>=25)
+# Source variables
 source ./Combined_vars.txt
 
 # Configuration
@@ -6,13 +8,41 @@ DEBUG_MODE=${DEBUG_MODE:-0}  # Set to 1 for verbose output
 USE_NEW_SYNTAX=0
 ftw_ssh_timeout=${ftw_ssh_timeout:-10}
 
-# Logging functions
+# Manual overrides (can be set in Combined_vars.txt or exported)
+# EXL_Group_force_new_syntax=1 -> force new API syntax
+# EXL_Group_os_version="82.10" -> explicit OS version to consider
+EXL_Group_force_new_syntax=${EXL_Group_force_new_syntax:-0}
+EXL_Group_os_version=${EXL_Group_os_version:-""}
+
+# Logging
 log_message() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1"
 }
 
 log_debug() {
     [[ $DEBUG_MODE -eq 1 ]] && echo "DEBUG: $1" >&2
+}
+
+# Version comparison helper: returns 0 if ver_a >= ver_b
+version_ge() {
+    local ver_a=$1 ver_b=$2
+    local IFS=.
+    read -a a_parts <<< "$ver_a"
+    read -a b_parts <<< "$ver_b"
+    local i
+    for ((i=0; i<3; i++)); do
+        local A=${a_parts[i]:-0}
+        local B=${b_parts[i]:-0}
+        # avoid octal interpretation
+        A=$((10#$A))
+        B=$((10#$B))
+        if (( A > B )); then
+            return 0
+        elif (( A < B )); then
+            return 1
+        fi
+    done
+    return 0
 }
 
 # Check appliance SSH connectivity
@@ -31,15 +61,13 @@ check_ssh_status() {
 check_api_status() {
     log_message "Checking HTTPS connectivity to $EXL_Group_IP:443..."
 
-    # Check if curl_cli is available
     if ! command -v curl_cli &>/dev/null; then
         log_message "Warning: curl_cli not found, skipping HTTPS check"
         return 1
     fi
 
-    # Try to fetch the root page to verify HTTPS connectivity
-    local response=$(curl_cli -k -s -m $ftw_ssh_timeout --connect-timeout $ftw_ssh_timeout \
-        "https://$EXL_Group_IP/" 2>&1)
+    local response
+    response=$(curl_cli -k -s -m $ftw_ssh_timeout --connect-timeout $ftw_ssh_timeout "https://$EXL_Group_IP/" 2>&1)
 
     if [[ $? -eq 0 ]] && [[ "$response" == *"GAiA"* || "$response" == *"login"* || "$response" == *"WEBUI"* ]]; then
         log_message "Appliance is reachable via HTTPS"
@@ -54,19 +82,16 @@ check_api_status() {
 check_appliance_status() {
     log_message "Verifying appliance connectivity..."
 
-    # Try HTTPS first (primary method)
     if check_api_status; then
         return 0
     fi
 
-    # HTTPS failed, try SSH as fallback
     log_message "HTTPS failed, attempting SSH check..."
     if check_ssh_status; then
         log_message "Warning: HTTPS unavailable but SSH is reachable"
         return 0
     fi
 
-    # Both failed
     log_message "ERROR: Appliance unreachable via both HTTPS and SSH"
     log_message "Possible issues:"
     log_message "  - Appliance is down or rebooting"
@@ -79,10 +104,12 @@ check_appliance_status() {
 
 # Login and get session ID
 login() {
-    local response=$(mgmt_cli login user "$EXL_Group_user" password "$EXL_Group_pass" -m "$EXL_Group_IP" --context gaia_api --format json --unsafe-auto-accept true 2>&1)
+    local response
+    response=$(mgmt_cli login user "$EXL_Group_user" password "$EXL_Group_pass" -m "$EXL_Group_IP" --context gaia_api --format json --unsafe-auto-accept true 2>&1)
     log_debug "Login response: $response"
 
-    local session=$(echo "$response" | jq -r '.sid // empty' 2>/dev/null)
+    local session
+    session=$(echo "$response" | jq -r '.sid // empty' 2>/dev/null)
     if [[ -z "$session" || "$session" == "null" ]]; then
         log_message "ERROR: Failed to get session ID"
         log_message "Response: $response"
@@ -97,99 +124,177 @@ api_logout() {
     [[ -n "$1" ]] && mgmt_cli logout -m "$EXL_Group_IP" --context gaia_api --session-id "$1" &>/dev/null
 }
 
-# Check JHF version and determine syntax
+# Combined detection: JHF Take (old) and kernel/software/FW1 (new)
 check_jhf_version() {
     local session=$1
-    log_message "Detecting JHF version..."
+    log_message "Detecting JHF/OS version (JHF Take + kernel/software/FW1 checks)..."
 
-    # Run cpinfo - capture both stdout and stderr
-    local run_response=$(mgmt_cli run-script script "cpinfo -y all" -m "$EXL_Group_IP" --context gaia_api --version 1.8 --format json --session-id "$session" 2>&1)
-
-    # Check for API error responses
-    if [[ "$run_response" == *"generic_error"* ]] || [[ "$run_response" == *"Management API service is not available"* ]]; then
-        log_message "Warning: API returned error, using OLD syntax"
-        log_debug "API error: $run_response"
-        USE_NEW_SYNTAX=0
+    # 1) Manual override highest precedence
+    if [[ "${EXL_Group_force_new_syntax}" == "1" ]]; then
+        USE_NEW_SYNTAX=1
+        log_message "NEW API syntax forced by EXL_Group_force_new_syntax=1"
         return
+    fi
+
+    # 2) Explicit OS version provided
+    if [[ -n "$EXL_Group_os_version" ]]; then
+        local normalized
+        normalized=$(echo "$EXL_Group_os_version" | sed -E 's/[^0-9.]/./g' | sed -E 's/\.+/./g' | sed -E 's/^\.//; s/\.$//')
+        log_debug "Normalized EXL_Group_os_version: $normalized"
+        if version_ge "$normalized" "82.10"; then
+            USE_NEW_SYNTAX=1
+            log_message "Using NEW API syntax based on EXL_Group_os_version ($EXL_Group_os_version)"
+            return
+        else
+            log_message "EXL_Group_os_version provided ($EXL_Group_os_version) indicates OLD syntax"
+            # continue to allow cpinfo/JHF detection to run (explicit override could be considered final if desired)
+        fi
+    fi
+
+    # 3) Automatic detection via cpinfo
+    local run_response
+    run_response=$(mgmt_cli run-script script "cpinfo -y all" -m "$EXL_Group_IP" --context gaia_api --version 1.8 --format json --session-id "$session" 2>&1)
+
+    if [[ "$run_response" == *"generic_error"* ]] || [[ "$run_response" == *"Management API service is not available"* ]]; then
+        log_message "Warning: API returned error during cpinfo check, attempting fallback parsing"
+        log_debug "API error: $run_response"
+        # proceed: attempt to parse whatever text is present
     fi
 
     if [[ -z "$run_response" ]]; then
-        log_message "Warning: Empty response from cpinfo, using OLD syntax"
-        USE_NEW_SYNTAX=0
+        log_message "Warning: Empty response from cpinfo, using OLD syntax unless overrides present"
+        USE_NEW_SYNTAX=${USE_NEW_SYNTAX:-0}
         return
     fi
 
-    log_debug "cpinfo response: $run_response"
+    log_debug "cpinfo run_response (first 500 chars): ${run_response:0:500}"
 
-    # Extract JSON part (strip banner/header lines before first {)
-    local json_response=$(echo "$run_response" | sed -n '/{/,$ p')
-    log_debug "JSON extracted (first 300 chars): ${json_response:0:300}"
+    # Extract JSON block if present
+    local json_response
+    json_response=$(echo "$run_response" | sed -n '/{/,$ p')
 
-    # Extract task-id from JSON
-    local task_id=$(echo "$json_response" | jq -r '.tasks[0]."task-id" // empty' 2>/dev/null)
-
-    # Try alternative extraction if first attempt fails
-    if [[ -z "$task_id" || "$task_id" == "null" || "$task_id" == "empty" ]]; then
-        task_id=$(echo "$json_response" | jq -r '.tasks[]."task-id"' 2>/dev/null | head -1)
+    # Extract task-id if present
+    local task_id
+    task_id=$(echo "$json_response" | jq -r '.tasks[0]."task-id" // empty' 2>/dev/null || true)
+    if [[ -z "$task_id" || "$task_id" == "null" ]]; then
+        task_id=$(echo "$json_response" | jq -r '.tasks[]."task-id" // empty' 2>/dev/null | head -1 || true)
     fi
 
-    if [[ -z "$task_id" || "$task_id" == "null" || "$task_id" == "empty" ]]; then
-        log_message "Warning: Could not extract task-id, using OLD syntax"
-        log_debug "First 500 chars: ${json_response:0:500}"
-        USE_NEW_SYNTAX=0
+    # Poll if task-id exists
+    local task_json=""
+    if [[ -n "$task_id" ]]; then
+        log_debug "cpinfo task-id: $task_id"
+        local status="in progress"
+        local attempt=0
+        while [[ "$status" != "succeeded" && "$status" != "failed" && $attempt -lt 30 ]]; do
+            sleep 2
+            local task_response
+            task_response=$(mgmt_cli show task task-id "$task_id" -m "$EXL_Group_IP" --context gaia_api --version 1.8 --format json --session-id "$session" 2>&1)
+            task_json=$(echo "$task_response" | sed -n '/{/,$ p')
+            status=$(echo "$task_json" | jq -r '.tasks[0].status // empty' 2>/dev/null || true)
+            [[ -z "$status" ]] && status="in progress"
+            ((attempt++))
+        done
+
+        if [[ "$status" != "succeeded" ]]; then
+            log_message "Warning: cpinfo task status: $status (or timed out), will attempt to parse available output"
+            log_debug "Last task_json (first 1000 chars): ${task_json:0:1000}"
+        fi
+    fi
+
+    # Extract textual output
+    local output=""
+    if [[ -n "$task_json" ]]; then
+        output=$(echo "$task_json" | jq -r '.tasks[0]."task-details"[0].output // empty' 2>/dev/null || true)
+    fi
+    if [[ -z "$output" || "$output" == "null" ]]; then
+        # Try to extract raw leading text from run_response
+        output=$(echo "$run_response" | sed -n '1,400p' || true)
+    fi
+
+    if [[ -z "$output" ]]; then
+        log_message "Warning: No cpinfo textual output available, using OLD syntax unless overrides present"
+        USE_NEW_SYNTAX=${USE_NEW_SYNTAX:-0}
         return
     fi
 
-    log_debug "cpinfo task-id: $task_id"
+    # Decode base64 if needed
+    local decoded_output
+    decoded_output=$(echo "$output" | base64 -d 2>/dev/null || echo "$output")
+    log_debug "Decoded cpinfo output (first 800 chars): ${decoded_output:0:800}"
 
-    # Poll until complete
-    local status="in progress"
-    local attempt=0
-    while [[ "$status" != "succeeded" && "$status" != "failed" && $attempt -lt 30 ]]; do
-        sleep 2
-        local task_response=$(mgmt_cli show task task-id "$task_id" -m "$EXL_Group_IP" --context gaia_api --version 1.8 --format json --session-id "$session" 2>&1)
-
-        # Extract JSON from task response too
-        local task_json=$(echo "$task_response" | sed -n '/{/,$ p')
-        status=$(echo "$task_json" | jq -r '.tasks[0].status // empty' 2>/dev/null)
-        [[ -z "$status" ]] && status="in progress"
-        ((attempt++))
-    done
-
-    if [[ "$status" != "succeeded" ]]; then
-        log_message "Warning: cpinfo task status: $status, using OLD syntax"
-        USE_NEW_SYNTAX=0
-        return
-    fi
-
-    # Extract and decode output
-    local output=$(echo "$task_json" | jq -r '.tasks[0]."task-details"[0].output // empty' 2>/dev/null)
-    if [[ -z "$output" || "$output" == "null" || "$output" == "empty" ]]; then
-        log_message "Warning: No cpinfo output, using OLD syntax"
-        USE_NEW_SYNTAX=0
-        return
-    fi
-
-    # Try base64 decode, fallback to plain text
-    local decoded_output=$(echo "$output" | base64 -d 2>/dev/null || echo "$output")
-    log_debug "cpinfo output (first 500 chars): ${decoded_output:0:500}"
-
-    # Parse for JHF Take number
-    local take_number=$(echo "$decoded_output" | grep "BUNDLE_R82_JUMBO_HF_MAIN" | grep -oP 'Take:\s+\K\d+' | head -1)
+    # --- Old test: JHF Take number ---
+    local take_number
+    take_number=$(echo "$decoded_output" | grep -oP 'BUNDLE_R82_JUMBO_HF_MAIN.*?Take:\s*\K[0-9]+' 2>/dev/null | head -1 || true)
     if [[ -z "$take_number" ]]; then
-        log_message "Warning: Could not find JHF version, using OLD syntax"
-        USE_NEW_SYNTAX=0
+        take_number=$(echo "$decoded_output" | sed -n '1,300p' | awk '/JUMBO_HF/{f=1} f && /Take:/{print $NF; exit}' 2>/dev/null || true)
+    fi
+
+    # --- New test: kernel/software/FW1 version detection ---
+    local kernel_ver sw_ver fw1_ver
+    kernel_ver=$(echo "$decoded_output" | sed -n '1,300p' | grep -i -oP 'kernel[: ]*\s*R?\d+\.\d+' 2>/dev/null | grep -oP '\d+\.\d+' | head -1 || true)
+    sw_ver=$(echo "$decoded_output" | sed -n '1,300p' | grep -i -oP "software version[^\\n]*R?\d+\.\d+" 2>/dev/null | grep -oP '\d+\.\d+' | head -1 || true)
+    fw1_ver=$(echo "$decoded_output" | sed -n '/\[FW1\]/,/\[/{p}' 2>/dev/null | grep -oP 'R?\d+\.\d+' 2>/dev/null | sed 's/^R//' | head -1 || true)
+
+    # Fallback: first Rxx.yy anywhere in top lines
+    if [[ -z "$kernel_ver" && -z "$sw_ver" && -z "$fw1_ver" ]]; then
+        kernel_ver=$(echo "$decoded_output" | sed -n '1,300p' | grep -oP 'R?\d+\.\d+' 2>/dev/null | sed 's/^R//' | head -1 || true)
+    fi
+
+    kernel_ver=$(echo "$kernel_ver" | sed 's/^R//' || true)
+    sw_ver=$(echo "$sw_ver" | sed 's/^R//' || true)
+    fw1_ver=$(echo "$fw1_ver" | sed 's/^R//' || true)
+
+    log_debug "Parsed values: take_number='$take_number', kernel_ver='$kernel_ver', sw_ver='$sw_ver', fw1_ver='$fw1_ver'"
+
+    # Decision: enable NEW syntax if any test matches
+    if [[ -n "$take_number" && "$take_number" =~ ^[0-9]+$ ]]; then
+        log_message "Detected JHF Take number: $take_number"
+        if (( take_number >= 25 )); then
+            USE_NEW_SYNTAX=1
+            log_message "Using NEW API syntax because JHF Take >= 25 (Take: $take_number)"
+            return
+        else
+            log_debug "JHF Take < 25"
+        fi
+    fi
+
+    if [[ -n "$kernel_ver" ]]; then
+        log_message "Detected kernel version: $kernel_ver"
+        if version_ge "$kernel_ver" "82.10"; then
+            USE_NEW_SYNTAX=1
+            log_message "Using NEW API syntax based on detected kernel ($kernel_ver)"
+            return
+        fi
+    fi
+
+    if [[ -n "$sw_ver" ]]; then
+        log_message "Detected software version: $sw_ver"
+        if version_ge "$sw_ver" "82.10"; then
+            USE_NEW_SYNTAX=1
+            log_message "Using NEW API syntax based on detected software version ($sw_ver)"
+            return
+        fi
+    fi
+
+    if [[ -n "$fw1_ver" ]]; then
+        log_message "Detected FW1 version: $fw1_ver"
+        if version_ge "$fw1_ver" "82.10"; then
+            USE_NEW_SYNTAX=1
+            log_message "Using NEW API syntax based on detected FW1 version ($fw1_ver)"
+            return
+        fi
+    fi
+
+    # Final textual presence check (conservative)
+    if echo "$decoded_output" | sed -n '1,300p' | grep -q -E 'R?82\.10'; then
+        USE_NEW_SYNTAX=1
+        log_message "Using NEW API syntax due to presence of R82.10 in cpinfo output"
         return
     fi
 
-    log_message "JHF Take: $take_number"
-    if [[ $take_number -ge 25 ]]; then
-        USE_NEW_SYNTAX=1
-        log_message "Using NEW API syntax (JHF >= 25)"
-    else
-        USE_NEW_SYNTAX=0
-        log_message "Using OLD API syntax (JHF < 25)"
-    fi
+    log_message "Warning: Did not detect JHF>=25 nor kernel/software >= R82.10 — using OLD syntax"
+    USE_NEW_SYNTAX=0
 }
 
 # Setup bonds and VLANs
@@ -197,7 +302,8 @@ setup_bonds_and_vlans() {
     local session=$1
     log_message "Creating bond interface $EXL_Group_bondID..."
 
-    local response=$(mgmt_cli add bond-interface id "$EXL_Group_bondID" mode "$EXL_Group_bond_mode" \
+    local response
+    response=$(mgmt_cli add bond-interface id "$EXL_Group_bondID" mode "$EXL_Group_bond_mode" \
         members.1 "$EXL_Group_slave_1" members.2 "$EXL_Group_slave_2" \
         xmit-hash-policy "$EXL_Group_bond_xmithash" \
         -m "$EXL_Group_IP" --context gaia_api --version 1.8 --format json --session-id "$session" 2>&1)
@@ -254,8 +360,8 @@ create_vs() {
     log_message "Creating Virtual Systems..."
 
     for vs in $(seq $EXL_Group_start_vs_id $EXL_Group_end_vs_id); do
-        local exists=$(mgmt_cli show virtual-gateway id $vs -m "$EXL_Group_IP" \
-            --context gaia_api --version 1.8 --format json --session-id "$session" 2>&1)
+        local exists
+        exists=$(mgmt_cli show virtual-gateway id $vs -m "$EXL_Group_IP" --context gaia_api --version 1.8 --format json --session-id "$session" 2>&1)
 
         if [[ $exists == *"does not exist"* ]]; then
             local idx=$((EXL_Group_vscounter % ${#EXL_Group_vswitchid[@]}))
@@ -315,19 +421,14 @@ check_vs_creation_status() {
     log_message "Expecting $expected new Virtual Systems (VS${EXL_Group_start_vs_id} to VS${EXL_Group_end_vs_id})"
 
     while true; do
-        # Count how many of our target VS IDs exist by checking each one individually
         local created=0
         local missing_vs=""
 
         for vs_id in $(seq $EXL_Group_start_vs_id $EXL_Group_end_vs_id); do
-            # Check if this specific VS exists
-            local check_result=$(mgmt_cli show virtual-gateway id $vs_id \
-                -m "$EXL_Group_IP" --context gaia_api --version 1.8 --format json \
-                --session-id "$session" 2>&1)
-
+            local check_result
+            check_result=$(mgmt_cli show virtual-gateway id $vs_id -m "$EXL_Group_IP" --context gaia_api --version 1.8 --format json --session-id "$session" 2>&1)
             log_debug "VS $vs_id check result: ${check_result:0:200}"
 
-            # If it doesn't contain "does not exist", then it exists
             if [[ $check_result != *"does not exist"* ]] && [[ $check_result != *"not found"* ]]; then
                 ((created++))
                 log_debug "VS $vs_id found"
@@ -372,9 +473,10 @@ setup_interfaces() {
     for id in $(seq $EXL_Group_start_vs_id $EXL_Group_end_vs_id); do
         echo -n "VS $id: "
 
-        local vs_ints=$(mgmt_cli show interfaces virtual-system-id $id \
-            -m "$EXL_Group_IP" --context gaia_api --format json --session-id "$session" 2>&1)
-        local ints=$(echo "$vs_ints" | jq -r '.objects[].name // empty' 2>/dev/null)
+        local vs_ints
+        vs_ints=$(mgmt_cli show interfaces virtual-system-id $id -m "$EXL_Group_IP" --context gaia_api --format json --session-id "$session" 2>&1)
+        local ints
+        ints=$(echo "$vs_ints" | jq -r '.objects[].name // empty' 2>/dev/null || true)
 
         IFS=$'\n' read -r -d '' -a int_array <<< "$ints"$'\n'
 
@@ -413,18 +515,20 @@ main() {
 
     [[ $DEBUG_MODE -eq 1 ]] && log_message "DEBUG MODE ENABLED"
 
-    # Check SSH connectivity
+    # Check connectivity
     check_appliance_status || exit 1
 
     # Login
-    local session=$(login)
+    local session
+    session=$(login)
     log_message "Logged in successfully"
     trap "api_logout $session" EXIT INT TERM
 
-    # Detect JHF version
+    # Detect JHF / OS version and set USE_NEW_SYNTAX accordingly
     check_jhf_version "$session"
+    log_debug "USE_NEW_SYNTAX=$USE_NEW_SYNTAX"
 
-    # Execute setup
+    # Execute setup steps
     log_message "Starting bond and VLAN setup..."
     setup_bonds_and_vlans "$session"
 
